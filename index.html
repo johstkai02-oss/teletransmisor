@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Teletransmisor Acústico</title>
+<style>
+  body { background: #070b12; color: #e2e8f0; font-family: monospace; display: flex; justify-content: center; padding: 15px; margin: 0; }
+  .panel { border: 1.5px solid #2dd4bf; border-radius: 16px; padding: 18px; width: 100%; max-width: 420px; background: #0d131f; }
+  h2 { color: #2dd4bf; text-align: center; font-size: 16px; margin-top: 0; }
+  canvas { width: 100%; height: 110px; background: #05080e; border: 1px solid #1e293b; border-radius: 8px; display: block; margin-bottom: 12px; }
+  .status { display: flex; justify-content: space-between; font-size: 11px; color: #38bdf8; margin-bottom: 14px; }
+  input { width: 100%; box-sizing: border-box; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #162032; color: #fff; margin-bottom: 12px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  button { padding: 12px; border: none; border-radius: 8px; font-weight: bold; font-size: 12px; color: #fff; }
+  .btn-tx { background: #10b981; }
+  .btn-rx { background: #7c3aed; }
+  .log { background: #05080e; border: 1px solid #1e293b; border-radius: 8px; padding: 10px; min-height: 70px; font-size: 12px; color: #a7f3d0; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="panel">
+  <h2>⚡ TELETRANSMISOR ACÚSTICO FSK</h2>
+  <canvas id="scope"></canvas>
+  <div class="status"><span id="modo">MODO: EN ESPERA</span><span id="freq">PORTADORA: 0 Hz</span></div>
+  <input type="text" id="msgInput" placeholder="Escribe mensaje..." maxlength="30">
+  <div class="grid">
+    <button class="btn-tx" onclick="transmitir()">📡 TRANSMITIR</button>
+    <button class="btn-rx" id="btnRx" onclick="toggleReceptor()">🎧 ESCUCHAR</button>
+  </div>
+  <div class="log" id="logBox">> Listo para transmitir o recibir...</div>
+</div>
+<script>
+const F_START = 1200, F_ZERO = 1600, F_ONE = 2100, BIT_TIME = 0.09;
+let audioCtx, analyser, micStream, listening = false;
+const canvas = document.getElementById('scope'), ctx = canvas.getContext('2d');
+const log = (t) => document.getElementById('logBox').innerHTML = `> ${t}`;
+
+async function transmitir() {
+  const text = document.getElementById('msgInput').value.trim();
+  if (!text) return log("Escribe un mensaje primero.");
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  document.getElementById('modo').textContent = "MODO: TRANSMITIENDO";
+  log(`Enviando "${text}"...`);
+
+  let bits = "10101010";
+  for (let i = 0; i < text.length; i++) bits += text.charCodeAt(i).toString(2).padStart(8, '0');
+  bits += "00000000";
+
+  const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+  osc.type = 'sine'; osc.connect(gain); gain.connect(audioCtx.destination);
+  let now = audioCtx.currentTime;
+  osc.frequency.setValueAtTime(F_START, now); now += BIT_TIME * 2;
+  for (let b of bits) { osc.frequency.setValueAtTime(b === '1' ? F_ONE : F_ZERO, now); now += BIT_TIME; }
+  osc.start(); osc.stop(now);
+  osc.onended = () => { document.getElementById('modo').textContent = "MODO: EN ESPERA"; log("Transmisión completada."); };
+}
+async function toggleReceptor() {
+  if (listening) {
+    listening = false;
+    if (micStream) micStream.getTracks().forEach(t => t.stop());
+    document.getElementById('btnRx').textContent = "🎧 ESCUCHAR";
+    document.getElementById('modo').textContent = "MODO: EN ESPERA";
+    return;
+  }
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const src = audioCtx.createMediaStreamSource(micStream);
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048; src.connect(analyser);
+    listening = true;
+    document.getElementById('btnRx').textContent = "⏹ PARAR";
+    document.getElementById('modo').textContent = "MODO: ESCUCHANDO";
+    log("Escuchando tonos (1600/2100 Hz)...");
+    escuchar();
+  } catch (e) { log("Error: Permite el micrófono."); }
+}
+
+function escuchar() {
+  const buf = new Uint8Array(analyser.frequencyBinCount), sr = audioCtx.sampleRate;
+  let bits = "", last = 0;
+  function loop(now) {
+    if (!listening) return;
+    requestAnimationFrame(loop);
+    analyser.getByteFrequencyData(buf);
+    ctx.fillStyle = '#05080e'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#2dd4bf';
+    for (let i = 0; i < 60; i++) { const h = (buf[i * 2] / 255) * canvas.height; ctx.fillRect(i * 5, canvas.height - h, 3, h); }
+    let maxV = 0, maxI = 0;
+    for (let i = 0; i < buf.length; i++) if (buf[i] > maxV) { maxV = buf[i]; maxI = i; }
+    const freq = Math.round(maxI * sr / analyser.fftSize);
+    if (maxV > 140) {
+      document.getElementById('freq').textContent = `PORTADORA: ${freq} Hz`;
+      if (now - last > BIT_TIME * 1000) {
+        last = now;
+        if (Math.abs(freq - F_ONE) < 150) bits += "1";
+        else if (Math.abs(freq - F_ZERO) < 150) bits += "0";
+        if (bits.includes("10101010")) {
+          const p = bits.split("10101010").pop();
+          if (p && p.length >= 8 && p.length % 8 === 0) {
+            let txt = "";
+            for (let i = 0; i < p.length; i += 8) {
+              const c = parseInt(p.slice(i, i + 8), 2);
+              if (c === 0) { bits = ""; break; }
+              if (c >= 32 && c <= 126) txt += String.fromCharCode(c);
+            }
+            if (txt) log(`RECIBIDO: <b>${txt}</b>`);
+          }
+        }
+      }
+    }
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
